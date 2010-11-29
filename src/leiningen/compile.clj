@@ -134,13 +134,9 @@
                                             (format "%s %s" (last v) arg))))]
          (reduce join-broken-args [] (get-raw-input-args))))
 
-(defn- get-jvm-args [project]
-  (concat (get-input-args) (:jvm-opts project)))
-
-(defn get-readable-form [java project form init]
+(defn- get-readable-form [java project form]
   (let [cp (str (.getClasspath (.getCommandLine java)))
-        form `(do ~init
-                  (def ~'*classpath* ~cp)
+        form `(do (def ~'*classpath* ~cp)
                   (set! ~'*warn-on-reflection*
                         ~(:warn-on-reflection project))
                   ~form
@@ -161,10 +157,8 @@
   set correctly for the project. Pass in a handler function to have it called
   with the java task right before executing if you need to customize any of its
   properties (classpath, library-path, etc)."
-  [project form & [handler skip-auto-compile init]]
-  (when skip-auto-compile
-    (println "WARNING: eval-in-project's skip-auto-compile arg is deprecated."))
-  (when (and (not (or *skip-auto-compile* skip-auto-compile))
+  [project form & [handler skip-auto-compile]]
+  (when (and (not skip-auto-compile)
              (empty? (.list (file (:compile-path project)))))
     (binding [*silently* true]
       (compile project)))
@@ -181,52 +175,29 @@
                           (find-native-lib-path project))]
       (.setProject java lancet/ant-project)
       (.addSysproperty java (doto (Environment$Variable.)
-                              (.setKey "clojure.compile.path")
-                              (.setValue (:compile-path project))))
-      (when native-path
-        (.addSysproperty java (doto (Environment$Variable.)
-                                (.setKey "java.library.path")
-                                (.setValue (cond
-                                            (= file (class native-path))
-                                            (.getAbsolutePath native-path)
-                                            (fn? native-path) (native-path)
-                                            :default native-path)))))
-      (.setClasspath java (apply make-path (get-classpath project)))
-      (.setFailonerror java true)
-      (.setFork java true)
-      (.setDir java (file (:root project)))
-      (doseq [arg (get-jvm-args project)]
-        (when-not (re-matches #"^-Xbootclasspath.+" arg)
-          (.setValue (.createJvmarg java) arg)))
-      (.setClassname java "clojure.main")
-      ;; to allow plugins and other tasks to customize
-      (when handler
-        (println "WARNING: eval-in-project's handler argument is deprecated.")
-        (handler java))
-      (.setValue (.createArg java) "-e")
-      (.setValue (.createArg java) (get-readable-form java project form init))
-      (.executeJava java))))
+                              (.setKey "java.library.path")
+                              (.setValue (cond
+                                          (= java.io.File (class native-path))
+                                          (.getAbsolutePath native-path)
+                                          (fn? native-path) (native-path)
+                                          :default native-path)))))
+    (.setClasspath java (apply make-path (get-classpath project)))
+    (.setFailonerror java true)
+    (.setFork java true)
+    (doseq [arg (get-jvm-args project)]
+      (when-not (re-matches #"^-Xbootclasspath.+" arg)
+        (.setValue (.createJvmarg java) arg)))
+    (.setClassname java "clojure.main")
+    ;; to allow plugins and other tasks to customize
+    (when handler (handler java))
+    (.setValue (.createArg java) "-e")
+    (.setValue (.createArg java) (get-readable-form java project form))
+    (.executeJava java)))
 
-(defn- has-source-package?
-  "Test if the class file's package exists as a directory in :source-path."
-  [project f source-path]
-  (and source-path (.isDirectory (file (.replace (.getParent f)
-                                                 (:compile-path project)
-                                                 source-path)))))
-
-(defn- keep-class? [project f]
-  (or (has-source-package? project f (:source-path project))
-      (has-source-package? project f (:java-source-path project))
-      (.exists (file (str (.replace (.getParent f)
-                                    (:compile-path project)
-                                    (:source-path project)) ".clj")))))
-
-(defn delete-non-project-classes [project]
-  (when (and (not= :all (:aot project))
-             (not (:keep-non-project-classes project)))
-    (doseq [f (file-seq (file (:compile-path project)))
-            :when (and (.isFile f) (not (keep-class? project f)))]
-      (.delete f))))
+(defn- platform-nullsink []
+  (file (if (= :windows (get-os))
+          "NUL"
+          "/dev/null")))
 
 (defn- status [code msg]
   (when-not *silently*
